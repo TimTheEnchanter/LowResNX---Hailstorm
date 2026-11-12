@@ -371,15 +371,23 @@ def flip_px(px):
     return tuple(px[y * 8 + 7 - x] for y in range(8) for x in range(8))
 
 
-def alloc(px, tol=0, group=None):
-    """Return (char, flipx) for an 8x8 tile, reusing an existing tile when it
-    matches (optionally mirrored, optionally within tol differing pixels)."""
+def flipy_px(px):
+    return tuple(px[(7 - y) * 8 + x] for y in range(8) for x in range(8))
+
+
+def alloc(px, tol=0, group=None, fy=False):
+    """Return (char, attr flip bits) for an 8x8 tile, reusing an existing tile
+    when it matches (mirrored in X, or also in Y when fy, or within tol pixels)."""
     fl = flip_px(px)
     for t, c in tiles:
         if t == px:
             return c, 0
         if t == fl:
             return c, 1
+        if fy and t == flipy_px(px):
+            return c, 2
+        if fy and t == flipy_px(fl):
+            return c, 3
     if tol:
         for t, c in group:
             if sum(a != b for a, b in zip(px, t)) <= tol:
@@ -394,7 +402,7 @@ def alloc(px, tol=0, group=None):
     return c, 0
 
 
-def make_map(img, w, h, pal, tol=0, skip_empty=True):
+def make_map(img, w, h, pal, tol=0, skip_empty=True, fy=False):
     cells = []
     group = []   # fuzzy matches only reuse tiles from this same image
     for ty in range(h):
@@ -403,7 +411,7 @@ def make_map(img, w, h, pal, tol=0, skip_empty=True):
             if skip_empty and not any(px):
                 cells += [0, 0]
                 continue
-            c, f = alloc(px, tol, group)
+            c, f = alloc(px, tol, group, fy)
             cells += [c, pal | (f << 3)]
     return cells
 
@@ -433,6 +441,55 @@ for k in range(-4, 5):
 floor_map = [0, 0, 32, FROWS] + make_map(FIMG, 32, FROWS, 5, tol=4, skip_empty=False)
 print("floor tiles:", len(tiles) - n_ship, "free chars left:", len(free))
 
+# ---------------------------------------------------------------- font
+# The console copies its default font to chars 192-255, then copies OUR
+# character ROM on top. So ROM #2 now carries all 256 chars: the font glyphs
+# the game prints, and boss art in the glyph slots it never prints.
+# (Don't print these characters: " # $ % & ' ( ) * + , - . ; = ? @ [ \ ] ^ _)
+import re as _re
+_src = open(os.path.join(HERE, "default_characters.c")).read()
+_font = [[int(v, 16) for v in _re.findall(r"0x([0-9A-Fa-f]{2})", row)]
+         for row in _re.findall(r"\{([^{}]*)\}", _src.split("DefaultCharacters")[1])]
+_font = [r for r in _font if len(r) == 16][:64]
+for i, b in enumerate(_font):
+    chars[192 + i] = [((b[y] >> (7 - x)) & 1) | (((b[y + 8] >> (7 - x)) & 1) << 1)
+                      for y in range(8) for x in range(8)]
+UNUSED_GLYPHS = "\"#$%&'()*+,-.;=?@[\\]^_"
+free += [192 + ord(ch) - 32 for ch in UNUSED_GLYPHS]
+
+# ---------------------------------------------------------------- true final boss
+# 64x64 "eye of the storm", four-way symmetric so one quarter of the art
+# covers the whole body (tiles reused with X and Y flips). BG tiles, ROM #5.
+E = blank(64, 64)
+for y in range(64):
+    for x in range(64):
+        dx, dy = abs(x - 31.5), abs(y - 31.5)
+        r = math.hypot(dx, dy)
+        a = math.atan2(dy, dx)                      # 0..pi/2 in each quarter
+        col = 0
+        # eight spikes (on the axes and diagonals)
+        ad = min(abs(a), abs(a - math.pi / 4), abs(a - math.pi / 2))
+        if 21 <= r <= 31.5 and ad * r < (31.5 - r) * 0.45 + 1:
+            col = 1 if ad * r > (31.5 - r) * 0.45 - 0.6 else 2
+            if r > 29.5:
+                col = 3
+        if r <= 22:
+            col = 1 if r > 20.5 else 2
+            if 14 <= r <= 20.5 and int((a / (math.pi / 8)) * 2) % 2 == 0 and 15 < r < 20:
+                col = 1                              # armour teeth
+            if 12 <= r < 14:
+                col = 1
+            if r < 12:
+                col = 3 if r > 9 else 2              # iris
+            if r < 6:
+                col = 1                              # pupil
+            if 2 <= dx <= 3.5 and 2 <= dy <= 3.5:
+                col = 3                              # glints
+        E[y][x] = col
+n_before = len(tiles)
+boss4_map = [0, 0, 8, 8] + make_map(E, 8, 8, 3, fy=True)
+print("true boss tiles:", len(tiles) - n_before, "free chars left:", len(free))
+
 
 def char_bytes(c):
     px = chars[c]
@@ -448,7 +505,7 @@ def char_bytes(c):
     return lo + hi
 
 
-last_char = max(i for i in range(192) if any(chars[i]))
+last_char = 255
 char_data = []
 for c in range(last_char + 1):
     char_data += char_bytes(c)
@@ -550,6 +607,23 @@ for ch in ([46, 49, 53], [42, 46, 49], [44, 48, 51], [41, 45, 48]):
 fan_lead = [58, 0, 58, 61, 0, 0, 65, 0, 0, 0, 70, 0, 0, 0, 0, 0]
 fan_bass = [22, 0, 0, 0, 29, 0, 0, 0, 34, 0, 0, 0, 0, 0, 0, 0]
 
+# true final boss song: B minor, fast  (Bm G A F#)
+roots4 = [24, 20, 22, 19]
+bass4 = []
+for r in roots4:
+    bass4 += [r, r + 12, r, r + 12, r, r + 12, r + 7, r + 12]
+lead4_a = [71, 0, 0, 0, 70, 0, 66, 0,
+           67, 0, 0, 0, 66, 0, 62, 0,
+           69, 0, 0, 0, 67, 0, 66, 0,
+           66, 0, 0, 0, 0, 0, 70, 0]
+lead4_b = [74, 0, 71, 0, 66, 0, 71, 0,
+           74, 0, 72, 0, 67, 0, 72, 0,
+           73, 0, 69, 0, 64, 0, 69, 0,
+           73, 0, 0, 70, 0, 0, 66, 0]
+arp4 = []
+for ch in ([47, 50, 54], [43, 47, 50], [45, 49, 52], [42, 46, 49]):
+    arp4 += [ch[0], ch[1], ch[2], ch[1]] * 2
+
 tracks = [
     track(bass, 9 | 0 << 4, 0xE6),   # T0 bass, speed 6 ticks/row
     track(lead_a, 8 | 1 << 4),        # T1
@@ -565,6 +639,10 @@ tracks = [
     track(arp3, 5 | 2 << 4),          # T11
     track(fan_lead, 9 | 1 << 4, 0xE5),  # T12 fanfare lead
     track(fan_bass, 9 | 0 << 4, 0xE5),  # T13 fanfare bass
+    track(bass4, 9 | 0 << 4, 0xE4),  # T14 true boss bass, speed 4
+    track(lead4_a, 8 | 1 << 4),       # T15
+    track(lead4_b, 8 | 1 << 4),       # T16
+    track(arp4, 5 | 2 << 4),          # T17
 ]
 UNUSED = 64
 patterns = [[UNUSED] * 4 for _ in range(64)]
@@ -580,6 +658,10 @@ patterns[8] = [8 | 0x80, 11, UNUSED, UNUSED]      # stage 3 song, MUSIC 8
 patterns[9] = [8, 9, UNUSED, UNUSED]
 patterns[10] = [8, 10, UNUSED, UNUSED]
 patterns[11] = [8, 9 | 0x80, UNUSED, UNUSED]
+patterns[12] = [14 | 0x80, 17, UNUSED, UNUSED]    # true boss song, MUSIC 12
+patterns[13] = [14, 15, UNUSED, UNUSED]
+patterns[14] = [14, 16, UNUSED, UNUSED]
+patterns[15] = [14, 15 | 0x80, UNUSED, UNUSED]
 sound_data = [b for p in presets for b in p] + [b for p in patterns for b in p]
 for t in tracks:
     sound_data += t
@@ -598,6 +680,7 @@ out += "#1:MAIN PALETTES\n" + hexblock(pal_data) + "\n\n"
 out += "#2:MAIN CHARACTERS\n" + hexblock(char_data) + "\n\n"
 out += "#3:BATTLESHIP MAP\n" + hexblock(map_data) + "\n\n"
 out += "#4:FLOOR MAP\n" + hexblock(floor_map) + "\n\n"
+out += "#5:EYE MAP\n" + hexblock(boss4_map) + "\n\n"
 out += "#15:MAIN SOUND\n" + hexblock(sound_data) + "\n"
 target = sys.argv[1] if len(sys.argv) > 1 else os.path.join(HERE, "Hailstorm.nx")
 open(target, "w").write(out)
